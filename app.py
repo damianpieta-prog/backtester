@@ -9,9 +9,27 @@ from datetime import datetime, timedelta
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(page_title="Backtester Pro", layout="wide")
 
+# --- POPRAWKA WIDOCZNOŚCI (CSS) ---
 st.markdown("""
     <style>
-    .stMetric { background-color: #161b22; padding: 15px; border-radius: 10px; border: 1px solid #30363d; }
+    /* Styl dla boksów Metric */
+    [data-testid="stMetricValue"] {
+        color: #ffffff !important;
+        font-size: 1.8rem !important;
+    }
+    [data-testid="stMetricLabel"] {
+        color: #a3a3a3 !important;
+    }
+    div[data-testid="stMetric"] {
+        background-color: #1e2227;
+        border: 1px solid #3e444e;
+        padding: 15px;
+        border-radius: 10px;
+    }
+    /* Tło całej strony */
+    .main {
+        background-color: #0e1117;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -71,7 +89,7 @@ else:
     df['Reg_Lower'] = np.exp(log_reg_line - 2 * log_std_dev)
     df['Reg_Upper'] = np.exp(log_reg_line + 2 * log_std_dev)
 
-    # --- CZYSZCZENIE NaN (Kluczowe dla uniknięcia TypeError) ---
+    # --- CZYSZCZENIE NaN ---
     df = df.dropna(subset=['EMA_F', 'EMA_S', 'RSI', 'EMA200'])
 
     # --- BACKTEST ---
@@ -112,17 +130,21 @@ else:
                 df.at[df.index[i], 'Signal'] = -1
 
     final_val = cash if shares == 0 else shares * float(df['Close'].iloc[-1])
+    profit_pct = (final_val - capital) / capital
     
-    # --- WYNIKI ---
+    # --- WIZUALIZACJA WYNIKÓW ---
     st.title(f"📊 Backtester: {ticker}")
+    
+    # Sekcja wskaźników z poprawioną widocznością
     c1, c2, c3 = st.columns(3)
-    c1.metric("Wynik Strategii", f"{((final_val-capital)/capital):.2%}")
+    c1.metric("Zysk Strategii", f"{profit_pct:.2%}")
     c2.metric("Kapitał Końcowy", f"${final_val:,.2f}")
-    c3.metric("Liczba Transakcji", len(trade_history))
+    c3.metric("Transakcje", len(trade_history))
 
+    # Wykres
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df['Reg_Lower'], name="-2σ", line=dict(color='cyan', dash='dot')))
-    fig.add_trace(go.Scatter(x=df.index, y=df['Reg_Upper'], name="+2σ", line=dict(color='magenta', dash='dot')))
+    fig.add_trace(go.Scatter(x=df.index, y=df['Reg_Lower'], name="-2σ (Dno)", line=dict(color='cyan', dash='dot')))
+    fig.add_trace(go.Scatter(x=df.index, y=df['Reg_Upper'], name="+2σ (Szczyt)", line=dict(color='magenta', dash='dot')))
     fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Cena", line=dict(color='white')))
     
     buys = df[df['Signal'] == 1]
@@ -134,5 +156,5 @@ else:
     st.plotly_chart(fig, use_container_width=True)
 
     if trade_history:
-        st.subheader("Ostatnie 10 transakcji")
-        st.table(pd.DataFrame(trade_history).tail(10))
+        st.subheader("Ostatnie transakcje")
+        st.dataframe(pd.DataFrame(trade_history).tail(10), use_container_width=True)
