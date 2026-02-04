@@ -9,155 +9,130 @@ from datetime import datetime, timedelta
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(page_title="Backtester Pro", layout="wide")
 
-# --- STYLIZACJA CSS ---
 st.markdown("""
     <style>
-    .main { background-color: #0e1117; }
     .stMetric { background-color: #161b22; padding: 15px; border-radius: 10px; border: 1px solid #30363d; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- SIDEBAR: PARAMETRY ---
-st.sidebar.header("🚀 Konfiguracja Backtestera")
+# --- SIDEBAR: PROFILE ---
+st.sidebar.header("🎯 Profile Strategii")
+profile = st.sidebar.selectbox(
+    "Wybierz profil", 
+    ["Manual (Własne)", "Agresywne Momentum", "Kupowanie Dołków (-2 SD)"]
+)
+
+if profile == "Agresywne Momentum":
+    d_rsi, d_sl, d_fast, d_slow = 65, 1.5, 9, 17
+elif profile == "Kupowanie Dołków (-2 SD)":
+    d_rsi, d_sl, d_fast, d_slow = 40, 3.0, 12, 26
+else:
+    d_rsi, d_sl, d_fast, d_slow = 60, 2.0, 9, 17
+
+# --- PARAMETRY ---
+st.sidebar.subheader("⚙️ Parametry Silnika")
 ticker = st.sidebar.text_input("Ticker", value="NVDA").upper()
 capital = st.sidebar.number_input("Kapitał początkowy ($)", value=10000)
-
-st.sidebar.subheader("Strategia Momentum")
-rsi_entry = st.sidebar.slider("RSI Próg Wejścia", 30, 80, 65)
-ema_fast = st.sidebar.slider("Szybka EMA (np. 9)", 5, 20, 9)
-ema_slow = st.sidebar.slider("Wolna EMA (np. 17)", 10, 50, 17)
-
-st.sidebar.subheader("Zarządzanie Ryzykiem")
-stop_loss_pct = st.sidebar.slider("Stop Loss (%)", 0.5, 5.0, 1.5) / 100
-
-st.sidebar.subheader("Zakres Danych")
+rsi_entry = st.sidebar.slider("RSI Próg Wejścia", 20, 80, d_rsi)
+ema_fast_val = st.sidebar.slider("Szybka EMA", 5, 20, d_fast)
+ema_slow_val = st.sidebar.slider("Wolna EMA", 10, 50, d_slow)
+stop_loss_pct = st.sidebar.slider("Stop Loss (%)", 0.5, 10.0, d_sl) / 100
 years = st.sidebar.slider("Lata wstecz", 1, 10, 2)
 
-# --- FUNKCJA POBIERANIA DANYCH ---
 @st.cache_data
 def load_data(symbol, yrs):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=yrs*365)
-    df = yf.download(symbol, start=start_date, end=end_date, interval="1d")
-    return df
+    data = yf.download(symbol, start=start_date, end=end_date, interval="1d")
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    return data
 
 df_raw = load_data(ticker, years)
 
 if df_raw.empty:
-    st.error(f"Nie znaleziono danych dla tickera: {ticker}. Sprawdź poprawność symbolu.")
+    st.error(f"Brak danych dla: {ticker}")
 else:
     df = df_raw.copy()
     
-    # --- OBLICZENIA TECHNICZNE ---
-    df['EMA_F'] = ta.ema(df['Close'], length=ema_fast)
-    df['EMA_S'] = ta.ema(df['Close'], length=ema_slow)
+    # --- WSKAŹNIKI ---
+    df['EMA_F'] = ta.ema(df['Close'], length=ema_fast_val)
+    df['EMA_S'] = ta.ema(df['Close'], length=ema_slow_val)
     df['EMA100'] = ta.ema(df['Close'], length=100)
     df['EMA200'] = ta.ema(df['Close'], length=200)
     df['RSI'] = ta.rsi(df['Close'], length=14)
     
-    # --- REGRESJA LINIOWA LOGARYTMICZNA ---
-    # Logarytmowanie ceny zamkniecia
+    # --- REGRESJA ---
     log_close = np.log(df['Close'].values)
     x = np.arange(len(log_close))
-    
-    # Wyznaczanie linii regresji (y = mx + c)
     slope, intercept = np.polyfit(x, log_close, 1)
     log_reg_line = slope * x + intercept
-    
-    # Odchylenie standardowe logarytmiczne
     log_std_dev = np.std(log_close - log_reg_line)
-    
-    # Powrót do wartości nominalnych (exp)
-    df['Reg_Mid'] = np.exp(log_reg_line)
-    df['Reg_Lower'] = np.exp(log_reg_line - 2 * log_std_dev) # -2 Odchylenia
-    df['Reg_Upper'] = np.exp(log_reg_line + 2 * log_std_dev) # +2 Odchylenia
+    df['Reg_Lower'] = np.exp(log_reg_line - 2 * log_std_dev)
+    df['Reg_Upper'] = np.exp(log_reg_line + 2 * log_std_dev)
 
-    # --- SILNIK BACKTESTU ---
+    # --- CZYSZCZENIE NaN (Kluczowe dla uniknięcia TypeError) ---
+    df = df.dropna(subset=['EMA_F', 'EMA_S', 'RSI', 'EMA200'])
+
+    # --- BACKTEST ---
     df['Signal'] = 0
-    cash = capital
-    shares = 0
-    entry_price = 0
+    cash, shares, entry_price = float(capital), 0.0, 0.0
     trade_history = []
 
-    for i in range(1, len(df)):
-        current_price = df['Close'].iloc[i]
-        
-        # WARUNEK WEJŚCIA (BUY)
+    for i in range(len(df)):
+        price = float(df['Close'].iloc[i])
+        f_ema = float(df['EMA_F'].iloc[i])
+        s_ema = float(df['EMA_S'].iloc[i])
+        rsi = float(df['RSI'].iloc[i])
+        ema100 = float(df['EMA100'].iloc[i])
+        reg_low = float(df['Reg_Lower'].iloc[i])
+
         if shares == 0:
-            buy_condition = (
-                df['EMA_F'].iloc[i] > df['EMA_S'].iloc[i] and
-                df['RSI'].iloc[i] >= rsi_entry and
-                current_price > df['EMA100'].iloc[i] and
-                current_price > df['EMA200'].iloc[i]
-            )
-            if buy_condition:
-                shares = cash / current_price
-                entry_price = current_price
-                cash = 0
+            mom_cond = (f_ema > s_ema and rsi >= rsi_entry)
+            trend_cond = (price > ema100)
+            reg_cond = True if profile != "Kupowanie Dołków (-2 SD)" else price < (reg_low * 1.05)
+
+            if mom_cond and trend_cond and reg_cond:
+                shares = cash / price
+                entry_price = price
+                cash = 0.0
                 df.at[df.index[i], 'Signal'] = 1
                 
-        # WARUNEK WYJŚCIA (SELL)
         elif shares > 0:
             sl_price = entry_price * (1 - stop_loss_pct)
-            sell_condition = (current_price <= sl_price) or (df['EMA_F'].iloc[i] < df['EMA_S'].iloc[i])
-            
-            if sell_condition:
-                cash = shares * current_price
-                pnl_pct = (current_price - entry_price) / entry_price
+            if price <= sl_price or f_ema < s_ema:
+                cash = shares * price
+                pnl = (price - entry_price) / entry_price
                 trade_history.append({
-                    "Data Wejścia": df.index[df.index.get_loc(df.index[i]) - 1], # orientacyjnie
-                    "Data Wyjścia": df.index[i],
-                    "Zysk/Strata %": round(pnl_pct * 100, 2),
+                    "Data": df.index[i].date(),
+                    "Zysk %": round(pnl * 100, 2),
                     "Kapitał": round(cash, 2)
                 })
-                shares = 0
+                shares = 0.0
                 df.at[df.index[i], 'Signal'] = -1
 
-    final_value = cash if shares == 0 else shares * df['Close'].iloc[-1]
-    total_return = (final_value - capital) / capital
-    buy_hold_return = (df['Close'].iloc[-1] - df['Close'].iloc[0]) / df['Close'].iloc[0]
-
-    # --- WIZUALIZACJA WYNIKÓW ---
+    final_val = cash if shares == 0 else shares * float(df['Close'].iloc[-1])
+    
+    # --- WYNIKI ---
     st.title(f"📊 Backtester: {ticker}")
-    
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Wynik Strategii", f"{total_return:.2%}", delta=f"{(total_return - buy_hold_return):.2%} vs Rynek")
-    m2.metric("Buy & Hold", f"{buy_hold_return:.2%}")
-    m3.metric("Kapitał Końcowy", f"${final_value:,.2f}")
-    m4.metric("Ilość Transakcji", len(trade_history))
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Wynik Strategii", f"{((final_val-capital)/capital):.2%}")
+    c2.metric("Kapitał Końcowy", f"${final_val:,.2f}")
+    c3.metric("Liczba Transakcji", len(trade_history))
 
-    # --- WYKRES ---
     fig = go.Figure()
-
-    # Kanał Regresji
-    fig.add_trace(go.Scatter(x=df.index, y=df['Reg_Upper'], name="+2σ (Opór)", line=dict(color='rgba(255, 0, 255, 0.4)', dash='dash')))
-    fig.add_trace(go.Scatter(x=df.index, y=df['Reg_Lower'], name="-2σ (Wsparcie)", line=dict(color='rgba(0, 255, 255, 0.4)', dash='dash')))
+    fig.add_trace(go.Scatter(x=df.index, y=df['Reg_Lower'], name="-2σ", line=dict(color='cyan', dash='dot')))
+    fig.add_trace(go.Scatter(x=df.index, y=df['Reg_Upper'], name="+2σ", line=dict(color='magenta', dash='dot')))
+    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Cena", line=dict(color='white')))
     
-    # Cena
-    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Cena", line=dict(color='white', width=2)))
-    
-    # EMA
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA_F'], name=f"EMA {ema_fast}", line=dict(color='orange', width=1)))
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA_S'], name=f"EMA {ema_slow}", line=dict(color='blue', width=1)))
-
-    # Sygnały
     buys = df[df['Signal'] == 1]
     sells = df[df['Signal'] == -1]
-    fig.add_trace(go.Scatter(x=buys.index, y=buys['Close'], mode='markers', marker=dict(symbol='triangle-up', size=12, color='#00ff00'), name="BUY"))
-    fig.add_trace(go.Scatter(x=sells.index, y=sells['Close'], mode='markers', marker=dict(symbol='triangle-down', size=12, color='#ff0000'), name="SELL"))
+    fig.add_trace(go.Scatter(x=buys.index, y=buys['Close'], mode='markers', marker=dict(symbol='triangle-up', size=12, color='green'), name="BUY"))
+    fig.add_trace(go.Scatter(x=sells.index, y=sells['Close'], mode='markers', marker=dict(symbol='triangle-down', size=12, color='red'), name="SELL"))
 
-    fig.update_layout(
-        template="plotly_dark", 
-        height=700, 
-        yaxis_type="log", 
-        title="Skala Logarytmiczna + Kanał Regresji Liniowej",
-        xaxis_rangeslider_visible=False
-    )
+    fig.update_layout(template="plotly_dark", height=600, yaxis_type="log", xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- TABELA TRANSAKCJI ---
     if trade_history:
-        st.subheader("📝 Historia Transakcji")
-        st.dataframe(pd.DataFrame(trade_history).sort_index(ascending=False), use_container_width=True)
-    else:
-        st.info("Brak zamkniętych transakcji w tym okresie przy obecnych parametrach.")
+        st.subheader("Ostatnie 10 transakcji")
+        st.table(pd.DataFrame(trade_history).tail(10))
