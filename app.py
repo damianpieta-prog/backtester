@@ -12,7 +12,6 @@ st.set_page_config(page_title="Backtester Pro", layout="wide")
 # --- POPRAWKA WIDOCZNOŚCI (CSS) ---
 st.markdown("""
     <style>
-    /* Styl dla boksów Metric */
     [data-testid="stMetricValue"] {
         color: #ffffff !important;
         font-size: 1.8rem !important;
@@ -26,14 +25,39 @@ st.markdown("""
         padding: 15px;
         border-radius: 10px;
     }
-    /* Tło całej strony */
     .main {
         background-color: #0e1117;
     }
     </style>
     """, unsafe_allow_html=True)
 
-# --- SIDEBAR: PROFILE ---
+# --- SIDEBAR: WYBÓR TICKERA ---
+st.sidebar.header("🔍 Wybór Aktywa")
+
+# Lista popularnych tickerów
+popular_tickers = {
+    "NVIDIA": "NVDA",
+    "Bitcoin": "BTC-USD",
+    "Ethereum": "ETH-USD",
+    "Tesla": "TSLA",
+    "Apple": "AAPL",
+    "Microsoft": "MSFT",
+    "Amazon": "AMZN",
+    "S&P 500 (ETF)": "SPY",
+    "CD Projekt (GPW)": "CDR.WA",
+    "Orlen (GPW)": "PKN.WA",
+    "Allegro (GPW)": "ALE.WA",
+    "Własny ticker...": "CUSTOM"
+}
+
+selection = st.sidebar.selectbox("Wybierz instrument", list(popular_tickers.keys()), index=0)
+
+if popular_tickers[selection] == "CUSTOM":
+    ticker = st.sidebar.text_input("Wpisz ticker (np. GOOGL lub META)", value="NVDA").upper()
+else:
+    ticker = popular_tickers[selection]
+
+# --- SIDEBAR: PROFILE STRATEGII ---
 st.sidebar.header("🎯 Profile Strategii")
 profile = st.sidebar.selectbox(
     "Wybierz profil", 
@@ -49,7 +73,6 @@ else:
 
 # --- PARAMETRY ---
 st.sidebar.subheader("⚙️ Parametry Silnika")
-ticker = st.sidebar.text_input("Ticker", value="NVDA").upper()
 capital = st.sidebar.number_input("Kapitał początkowy ($)", value=10000)
 rsi_entry = st.sidebar.slider("RSI Próg Wejścia", 20, 80, d_rsi)
 ema_fast_val = st.sidebar.slider("Szybka EMA", 5, 20, d_fast)
@@ -69,7 +92,7 @@ def load_data(symbol, yrs):
 df_raw = load_data(ticker, years)
 
 if df_raw.empty:
-    st.error(f"Brak danych dla: {ticker}")
+    st.error(f"Brak danych dla: {ticker}. Upewnij się, że ticker jest poprawny.")
 else:
     df = df_raw.copy()
     
@@ -108,7 +131,7 @@ else:
         if shares == 0:
             mom_cond = (f_ema > s_ema and rsi >= rsi_entry)
             trend_cond = (price > ema100)
-            reg_cond = True if profile != "Kupowanie Dołków (-2 SD)" else price < (reg_low * 1.05)
+            reg_cond = True if profile != "Kupowanie Dołków (-2 SD)" else price < (reg_low * 1.10)
 
             if mom_cond and trend_cond and reg_cond:
                 shares = cash / price
@@ -133,13 +156,12 @@ else:
     profit_pct = (final_val - capital) / capital
     
     # --- WIZUALIZACJA WYNIKÓW ---
-    st.title(f"📊 Backtester: {ticker}")
+    st.title(f"📊 {ticker}: {selection}")
     
-    # Sekcja wskaźników z poprawioną widocznością
     c1, c2, c3 = st.columns(3)
-    c1.metric("Zysk Strategii", f"{profit_pct:.2%}")
+    c1.metric("Wynik Strategii", f"{profit_pct:.2%}")
     c2.metric("Kapitał Końcowy", f"${final_val:,.2f}")
-    c3.metric("Transakcje", len(trade_history))
+    c3.metric("Liczba Transakcji", len(trade_history))
 
     # Wykres
     fig = go.Figure()
